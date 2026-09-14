@@ -32,11 +32,54 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifdef ROUNDABOUT_DIAGNOSTICS
+#include <cstdarg>
+#include <cstdio>
+#endif
+
 // Optional, narrow diagnostics for roundabout metadata only.
 // Enabled explicitly at build time with -DROUNDABOUT_DIAGNOSTICS.
 // Normal release builds compile this out completely.
+//
+// Diagnostics are intentionally written to /tmp instead of the normal stderr
+// logger so testers can retrieve a single, self-contained file without
+// changing any Mazda Connect logging configuration.  /tmp is used only for
+// temporary data; failures to open/write the file are ignored.  The file is
+// capped to keep a forgotten diagnostics build from growing without bound.
 #ifdef ROUNDABOUT_DIAGNOSTICS
-#  define ROUNDABOUT_LOG(fmt, ...) LOG_EMIT("R", fmt, ##__VA_ARGS__)
+namespace {
+
+const char kRoundaboutLogPath[] = "/tmp/oem-aa-roundabout.log";
+const long kRoundaboutLogMaxBytes = 1024L * 1024L; // 1 MiB
+
+void roundabout_log_file(const char *fmt, ...)
+{
+    std::FILE *f = std::fopen(kRoundaboutLogPath, "a+");
+    if (!f) return;
+
+    // Best-effort size cap.  If seeking/telling fails, still allow the small
+    // diagnostic write rather than affecting navigation behavior.
+    if (std::fseek(f, 0, SEEK_END) == 0) {
+        const long size = std::ftell(f);
+        if (size >= kRoundaboutLogMaxBytes) {
+            std::fclose(f);
+            return;
+        }
+    }
+
+    std::fprintf(f, "[libpatch-blmjciaapa][HUD][R] ");
+    va_list ap;
+    va_start(ap, fmt);
+    std::vfprintf(f, fmt, ap);
+    va_end(ap);
+    std::fputc('\n', f);
+    std::fflush(f);
+    std::fclose(f);
+}
+
+} // namespace
+
+#  define ROUNDABOUT_LOG(fmt, ...) roundabout_log_file(fmt, ##__VA_ARGS__)
 #else
 #  define ROUNDABOUT_LOG(fmt, ...) do { } while (0)
 #endif
