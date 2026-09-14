@@ -32,6 +32,15 @@
 #include <stdint.h>
 #include <string.h>
 
+// Optional, narrow diagnostics for roundabout metadata only.
+// Enabled explicitly at build time with -DROUNDABOUT_DIAGNOSTICS.
+// Normal release builds compile this out completely.
+#ifdef ROUNDABOUT_DIAGNOSTICS
+#  define ROUNDABOUT_LOG(fmt, ...) LOG_EMIT("R", fmt, ##__VA_ARGS__)
+#else
+#  define ROUNDABOUT_LOG(fmt, ...) do { } while (0)
+#endif
+
 namespace {
 
 // Transport forwarders — bind once to the configured backend, then stay
@@ -482,6 +491,23 @@ void our_nav_cb(void *user_ctx, void *hdr36)
         const NextTurnHdr *t = static_cast<const NextTurnHdr *>(hdr36);
         const uint32_t turn_event = decode_turn_event(t->turn_event);
         dump_next_turn(t, turn_event);
+#ifdef ROUNDABOUT_DIAGNOSTICS
+        if (turn_event == NAV_TURN_EVENT_ROUNDABOUT_ENTER ||
+            turn_event == NAV_TURN_EVENT_ROUNDABOUT_EXIT ||
+            turn_event == NAV_TURN_EVENT_ROUNDABOUT_ENTER_AND_EXIT) {
+            ROUNDABOUT_LOG("GAL1.5 event=%u(%s) raw_event=%u side=%u(%s) "
+                           "angle=%d exit=%d glyph=%u",
+                           static_cast<unsigned>(turn_event),
+                           nav_turn_event_name(turn_event),
+                           static_cast<unsigned>(t->turn_event),
+                           static_cast<unsigned>(t->turn_side),
+                           nav_turn_side_name(t->turn_side),
+                           static_cast<int>(t->turn_angle),
+                           static_cast<int>(t->turn_number),
+                           static_cast<unsigned>(compute_turn_icon(
+                               turn_event, t->turn_side, t->turn_angle)));
+        }
+#endif
         hud_tx_next_turn(t->road_name, t->turn_side, turn_event,
                          t->turn_angle, t->turn_number);
         break;
@@ -590,6 +616,16 @@ static AaNav16HudState g_nav16_acc;   // merged guidance (zero-init: gap-free me
 static AaNav16HudState g_nav16_last;  // last frame fed to the transport (change-gate)
 static bool g_nav16_have_last = false;
 
+#ifdef ROUNDABOUT_DIAGNOSTICS
+struct Roundabout16DiagState {
+    uint32_t maneuver;
+    int32_t exit_number;
+    int32_t exit_angle;
+    bool valid;
+};
+static Roundabout16DiagState g_roundabout16_diag;
+#endif
+
 // Reset the accumulator + change-gate. Owned by the rx lifecycle: called from
 // hud_nav16_rx_start() BEFORE the receiver thread exists (the only other
 // toucher of this state), so it needs no locking. Without this, a session that
@@ -600,6 +636,9 @@ void hud_feed_nav16_reset(void)
 {
     memset(&g_nav16_acc, 0, sizeof(g_nav16_acc));
     g_nav16_have_last = false;
+#ifdef ROUNDABOUT_DIAGNOSTICS
+    memset(&g_roundabout16_diag, 0, sizeof(g_roundabout16_diag));
+#endif
     LOGV("nav: accumulator + change-gate reset");
 }
 
@@ -634,6 +673,26 @@ static void nav16_on_guidance(const AaGuidance *g)
 {
 #if LOG_LEVEL <= LOG_LEVEL_VERBOSE
     char line[320]; hud_nav16_format_guidance(g, line, sizeof(line)); LOGV("%s", line);
+#endif
+#ifdef ROUNDABOUT_DIAGNOSTICS
+    if (g && g->maneuver_type >= 30 && g->maneuver_type <= 35) {
+        if (!g_roundabout16_diag.valid ||
+            g_roundabout16_diag.maneuver != g->maneuver_type ||
+            g_roundabout16_diag.exit_number != g->roundabout_exit_number ||
+            g_roundabout16_diag.exit_angle != g->roundabout_exit_angle) {
+            ROUNDABOUT_LOG("GAL1.6 maneuver=%u exit=%d angle=%d glyph=%u",
+                           static_cast<unsigned>(g->maneuver_type),
+                           static_cast<int>(g->roundabout_exit_number),
+                           static_cast<int>(g->roundabout_exit_angle),
+                           static_cast<unsigned>(hud_nav16_glyph(g)));
+            g_roundabout16_diag.maneuver = g->maneuver_type;
+            g_roundabout16_diag.exit_number = g->roundabout_exit_number;
+            g_roundabout16_diag.exit_angle = g->roundabout_exit_angle;
+            g_roundabout16_diag.valid = true;
+        }
+    } else {
+        g_roundabout16_diag.valid = false;
+    }
 #endif
     AaNav16HudState &acc = g_nav16_acc;
 
